@@ -34,6 +34,15 @@ $LLM_FP verify \
   --reference openai/gpt-4o-mini \
   --preset quick --json
 
+# --- 3b. OrcaRouter Cyber Inference (named provider) ---------------------------
+# export ORCAROUTER_API_KEY=...  # sk-orca-* key; see https://www.orcarouter.ai/console/keys
+$LLM_FP providers                       # preset, default model and key links
+# Live model picker: lists chat-capable models from the provider /models endpoint
+$LLM_FP fingerprint --provider orcarouter --model '?' --preset quick
+# Or name a model explicitly (default: orcarouter/auto; cyber: orca/orcacyber-zero-1.5)
+$LLM_FP verify --provider orcarouter --model orcarouter/auto \
+  --reference openai/gpt-4o-mini --preset quick --json
+
 # --- 4. Offline: compare two saved fingerprints --------------------------------
 $LLM_FP compare reference.gpt-4o-mini.json some-other.fingerprint.json
 

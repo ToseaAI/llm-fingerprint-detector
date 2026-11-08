@@ -10,6 +10,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import process from 'node:process'
+import { createInterface } from 'node:readline/promises'
 import { fileURLToPath } from 'node:url'
 
 import { compare, fingerprint, verify } from './api.js'
@@ -19,6 +20,18 @@ import {
   DEFAULT_CONCURRENCY,
   DEFAULT_SAMPLES_PER_CELL,
 } from './constants.js'
+import {
+  ORCAROUTER_CYBER_CATALOG_URL,
+  ORCAROUTER_KEYS_URL,
+  ORCAROUTER_PROVIDER_URL,
+  ORCAROUTER_PRESET,
+  PROVIDER_PRESETS,
+  discoverOrcaRouterModels,
+  isOrcaRouterBaseUrl,
+  orderCatalogForSelector,
+  resolveProviderChoice,
+} from './providers/orcarouter.js'
+import { ProbeRequestError } from './http.js'
 import {
   getBundledAttribution,
   listBundledReferences,
@@ -50,6 +63,7 @@ const VALUE_OPTIONS = new Set([
   '--preset',
   '--reference',
   '--out',
+  '--provider',
 ])
 const BOOLEAN_OPTIONS = new Set(['--json', '--quiet', '--help', '-h', '--version', '-V'])
 
@@ -115,12 +129,19 @@ COMMANDS
   verify        Fingerprint an endpoint and compare it to a reference
   compare       Compare two saved fingerprints (files or bundled ids)
   references    List bundled sample reference fingerprints
+  providers     List named providers${PROVIDER_PRESETS.map((p) => ` (${p.id})`).join('')}
 
 ENDPOINT OPTIONS
+  --provider <id>       Named provider preset (see 'providers'). Currently:
+                        ${PROVIDER_PRESETS.map((p) => `${p.id} — ${p.name}`).join(', ')}
+                        sets the base URL, key env var (${ORCAROUTER_PRESET.apiKeyEnv})
+                        and default model (${ORCAROUTER_PRESET.defaultModel})
   --base-url <url>      OpenAI-compatible base URL, e.g. https://api.openai.com/v1
-  --model <id>          Model id to request, e.g. gpt-4o-mini
+                        (optional with --provider; overrides its base URL)
+  --model <id>          Model id to request, e.g. gpt-4o-mini, or the model
+                        picker's index / list number with --provider
   --api-key-env <name>  Env var holding the API key
-                        (default: tries ${DEFAULT_KEY_ENV_VARS.join(', ')})
+                        (default: tries ${DEFAULT_KEY_ENV_VARS.join(', ')}, then ${ORCAROUTER_PRESET.apiKeyEnv})
   --api-key <key>       API key literal — avoid; prefer --api-key-env
 
 SAMPLING OPTIONS
@@ -159,21 +180,128 @@ EXAMPLES
   llm-fingerprint verify --base-url https://openrouter.ai/api/v1 \\
     --model openai/gpt-4o-mini --reference openai/gpt-4o-mini --preset quick
 
+  # Fingerprint a model served by OrcaRouter Cyber Inference (named provider)
+  ${ORCAROUTER_PRESET.apiKeyEnv}=sk-orca-... llm-fingerprint fingerprint \\
+    --provider ${ORCAROUTER_PRESET.id} --model ${ORCAROUTER_PRESET.defaultModel} \\
+    --out orcarouter-auto.fingerprint.json
+
   # Compare two saved fingerprints offline
   llm-fingerprint compare a.fingerprint.json b.fingerprint.json
 
 Web version (no install): https://tosea.ai/free-tools/llm-api-fingerprint-checker
 `
 
-function readEndpoint(args: ParsedArgs): Endpoint {
-  const baseUrl = args.options.get('--base-url')
-  const model = args.options.get('--model')
-  if (typeof baseUrl !== 'string') fail('--base-url is required')
-  if (typeof model !== 'string') fail('--model is required')
-  return { baseUrl, model, apiKey: resolveApiKey(args) }
+interface EndpointChoice {
+  endpoint: Endpoint
+  providerId: string | null
 }
 
-function resolveApiKey(args: ParsedArgs): string | undefined {
+/**
+ * Resolve `--provider` / `--base-url` / `--model`. With a named provider the
+ * base URL and model default come from the preset; otherwise `--base-url` and
+ * `--model` are required exactly as before.
+ */
+async function readEndpoint(args: ParsedArgs): Promise<EndpointChoice> {
+  const provider = args.options.get('--provider')
+  const baseUrl = args.options.get('--base-url')
+  const model = args.options.get('--model')
+  if (typeof baseUrl !== 'string' && typeof provider !== 'string') fail('--base-url is required')
+  if (typeof model !== 'string' && typeof provider !== 'string') fail('--model is required')
+  if (typeof provider === 'string') {
+    return resolveNamedProvider(args, provider, typeof baseUrl === 'string' ? baseUrl : undefined)
+  }
+  if (typeof baseUrl !== 'string' || typeof model !== 'string') fail('--base-url is required')
+  return {
+    endpoint: { baseUrl, model, apiKey: resolveApiKey(args) },
+    providerId: isOrcaRouterBaseUrl(baseUrl) ? ORCAROUTER_PRESET.id : null,
+  }
+}
+
+async function resolveNamedProvider(
+  args: ParsedArgs,
+  providerId: string,
+  baseUrl: string | undefined,
+): Promise<EndpointChoice> {
+  const apiKey = resolveApiKey(args, providerId)
+  const modelFlag = args.options.get('--model')
+  let choice
+  try {
+    choice = resolveProviderChoice({
+      provider: providerId,
+      baseUrl,
+      model: typeof modelFlag === 'string' ? modelFlag : undefined,
+      apiKey,
+    })
+  } catch (error) {
+    fail((error as Error).message)
+  }
+  for (const warning of choice.warnings) process.stderr.write(`warning: ${warning}\n`)
+  if (!apiKey) {
+    process.stderr.write(
+      `warning: provider "${providerId}" has no API key; requests will be rejected with 401/403. ` +
+        `Create a key at ${ORCAROUTER_KEYS_URL} or export ${choice.apiKeyEnvVars[0] ?? ORCAROUTER_PRESET.apiKeyEnv}\n`,
+    )
+  }
+  let model = choice.endpoint.model
+  if (typeof modelFlag === 'string' && modelFlag.trim() === '?') {
+    model = await chooseModelInteractively(choice.endpoint.baseUrl, apiKey)
+  }
+  return { endpoint: { ...choice.endpoint, model }, providerId: choice.preset?.id ?? providerId }
+}
+
+/**
+ * Model selector for the named provider. The list comes from `GET {baseUrl}/models`
+ * on the configured inference origin; when discovery fails the provider's small
+ * verified seed is offered and clearly labelled as degraded. There is no free-text
+ * fallback: pass `--model <id>` explicitly to override.
+ */
+async function chooseModelInteractively(baseUrl: string, apiKey: string | undefined): Promise<string> {
+  const catalog = await discoverOrcaRouterModels({ baseUrl, apiKey: apiKey ?? null })
+  const options = orderCatalogForSelector(catalog)
+  const out = process.stderr
+  if (catalog.source === 'live') {
+    out.write(`models: ${options.length} chat-capable model(s) from ${baseUrl}/models\n`)
+  } else {
+    out.write(
+      `warning: live model discovery unavailable${catalog.error ? ` (${catalog.error})` : ''}; ` +
+        'offering the OrcaRouter verified seed only\n',
+    )
+  }
+  options.forEach((entry, index) => {
+    const ctx = entry.contextLength ? `  ctx ${Math.round(entry.contextLength / 1000)}k` : ''
+    out.write(`  ${String(index + 1).padStart(2)}. ${entry.id}${ctx}\n`)
+  })
+  const prompt = `Enter a number 1-${options.length} (or a full model id): `
+  out.write(prompt)
+  const answer = await readLine(prompt)
+  const trimmed = answer.trim()
+  if (/^\d+$/.test(trimmed)) {
+    const picked = options[Number(trimmed) - 1]
+    if (!picked) fail(`model index ${trimmed} is out of range 1-${options.length}`)
+    return picked.id
+  }
+  if (!trimmed) fail('no model selected')
+  if (!options.some((entry) => entry.id === trimmed)) {
+    process.stderr.write(`warning: "${trimmed}" was not in the ${catalog.source} catalog list\n`)
+  }
+  return trimmed
+}
+
+async function readLine(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    const chunks: Buffer[] = []
+    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
+    return Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0] ?? ''
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stderr })
+  try {
+    return await rl.question(prompt)
+  } finally {
+    rl.close()
+  }
+}
+
+function resolveApiKey(args: ParsedArgs, providerId?: string): string | undefined {
   const literal = args.options.get('--api-key')
   if (typeof literal === 'string' && literal.trim()) return literal.trim()
 
@@ -184,12 +312,15 @@ function resolveApiKey(args: ParsedArgs): string | undefined {
     return value
   }
 
-  for (const name of DEFAULT_KEY_ENV_VARS) {
+  const names = providerId
+    ? [...DEFAULT_KEY_ENV_VARS, ORCAROUTER_PRESET.apiKeyEnv]
+    : DEFAULT_KEY_ENV_VARS
+  for (const name of names) {
     const value = process.env[name]
     if (value) return value
   }
   process.stderr.write(
-    `note: no API key found (checked ${DEFAULT_KEY_ENV_VARS.join(', ')}); ` +
+    `note: no API key found (checked ${names.join(', ')}); ` +
       'sending requests without Authorization header\n',
   )
   return undefined
@@ -260,6 +391,7 @@ function makeProgressRenderer(args: ParsedArgs): ((event: ProgressEvent) => void
   let lastPercent = -1
   return (event) => {
     if (event.stage === 'adapter') {
+      // A TTY shows a transient status line, cleared once the adapter is chosen.
       process.stderr.write(
         isTty
           ? `\rprobing reasoning adapter (${event.strategy})...          `
@@ -269,7 +401,7 @@ function makeProgressRenderer(args: ParsedArgs): ((event: ProgressEvent) => void
     }
     if (isTty) {
       const errs = event.errors > 0 ? `, errors: ${event.errors}` : ''
-      process.stderr.write(`\rsampling ${event.done}/${event.total}${errs}          `)
+      process.stderr.write(`\r\u001b[Ksampling ${event.done}/${event.total}${errs}`)
       if (event.done === event.total) process.stderr.write('\n')
     } else {
       const percent = Math.floor((event.done / event.total) * 10) * 10
@@ -279,6 +411,12 @@ function makeProgressRenderer(args: ParsedArgs): ((event: ProgressEvent) => void
       }
     }
   }
+}
+
+/** Record the named provider (never the key) in fingerprint metadata. */
+function metaOptions(options: FingerprintOptions, providerId: string | null): FingerprintOptions {
+  if (providerId !== ORCAROUTER_PRESET.id) return options
+  return { ...options, meta: { ...options.meta, provider: ORCAROUTER_PRESET.id, providerName: ORCAROUTER_PRESET.name } }
 }
 
 /** Load a reference: a JSON file path first, then a bundled sample id. */
@@ -382,12 +520,15 @@ function writeWarnings(warnings: string[]): void {
   for (const warning of warnings) process.stderr.write(`warning: ${warning}\n`)
 }
 
+let providerHint: string | null = null
+
 async function cmdFingerprint(args: ParsedArgs): Promise<number> {
-  const endpoint = readEndpoint(args)
+  const { endpoint, providerId } = await readEndpoint(args)
+  providerHint = providerId
   const options = readSamplingOptions(args)
   options.onProgress = makeProgressRenderer(args)
 
-  const run = await fingerprint(endpoint, options)
+  const run = await fingerprint(endpoint, metaOptions(options, providerId))
   writeWarnings(run.warnings)
 
   const out = args.options.get('--out')
@@ -415,11 +556,12 @@ async function cmdVerify(args: ParsedArgs): Promise<number> {
     fail('--reference <file-or-bundled-id> is required (see `llm-fingerprint references`)')
   }
   const reference = loadReference(referenceSource)
-  const endpoint = readEndpoint(args)
+  const { endpoint, providerId } = await readEndpoint(args)
+  providerHint = providerId
   const options = readSamplingOptions(args)
   options.onProgress = makeProgressRenderer(args)
 
-  const result = await verify(endpoint, reference, options)
+  const result = await verify(endpoint, reference, metaOptions(options, providerId))
   writeWarnings(result.warnings)
 
   const out = args.options.get('--out')
@@ -478,6 +620,43 @@ function cmdReferences(args: ParsedArgs): number {
   return 0
 }
 
+function cmdProviders(args: ParsedArgs): number {
+  const providers = PROVIDER_PRESETS.map((preset) => ({
+    id: preset.id,
+    name: preset.name,
+    baseUrl: preset.baseUrl,
+    apiKeyEnv: preset.apiKeyEnv,
+    defaultModel: preset.defaultModel,
+    suggestedModels: preset.suggestedModels,
+    description: preset.description,
+  }))
+  const attribution = {
+    providerPage: ORCAROUTER_PROVIDER_URL,
+    cyberModelCatalog: ORCAROUTER_CYBER_CATALOG_URL,
+    keys: ORCAROUTER_KEYS_URL,
+  }
+  if (args.options.get('--json')) {
+    process.stdout.write(`${JSON.stringify({ providers, attribution }, null, 2)}\n`)
+    return 0
+  }
+  process.stdout.write('Named providers:\n\n')
+  for (const preset of PROVIDER_PRESETS) {
+    process.stdout.write(`  ${preset.id} — ${preset.name}\n`)
+    process.stdout.write(`    ${preset.description}\n`)
+    process.stdout.write(`    base URL: ${preset.baseUrl}\n`)
+    process.stdout.write(`    key: export ${preset.apiKeyEnv}=sk-orca-... (or --api-key-env NAME)\n`)
+    process.stdout.write(`    default model: ${preset.defaultModel}\n`)
+    process.stdout.write(`    suggested: ${preset.suggestedModels.join(', ')}\n`)
+  }
+  process.stdout.write(
+    `\nProvider page: ${ORCAROUTER_PROVIDER_URL}\n` +
+      `Cyber-tier models: ${ORCAROUTER_CYBER_CATALOG_URL}\n` +
+      `Create or revoke a key: ${ORCAROUTER_KEYS_URL}\n` +
+      `Select a model from the live catalog: --provider ${ORCAROUTER_PRESET.id} --model '?'\n`,
+  )
+  return 0
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   const args = parseArgs(argv)
@@ -507,6 +686,9 @@ async function main(): Promise<void> {
       case 'references':
         exitCode = cmdReferences(args)
         break
+      case 'providers':
+        exitCode = cmdProviders(args)
+        break
       default:
         fail(`Unknown command: ${command} (see --help)`)
     }
@@ -514,11 +696,18 @@ async function main(): Promise<void> {
   } catch (error) {
     if (error instanceof ProbeRunError) {
       const hints: Record<string, string> = {
-        auth: 'The endpoint rejected the API key (401/403).',
+        auth: providerHint === ORCAROUTER_PRESET.id
+          ? `The ${ORCAROUTER_PRESET.name} endpoint rejected the API key (401/403). Check it is active and has model access, or create a new key at ${ORCAROUTER_KEYS_URL}.`
+          : 'The endpoint rejected the API key (401/403).',
         network: 'The endpoint is unreachable — check the base URL and your network.',
         aborted: 'Run cancelled.',
       }
       fail(`${hints[error.reason] ?? ''} ${error.message}`.trim())
+    }
+    if (error instanceof ProbeRequestError && error.kind === 'auth' && providerHint === ORCAROUTER_PRESET.id) {
+      fail(
+        `The ${ORCAROUTER_PRESET.name} endpoint rejected the API key (401/403). Check it is active and has model access, or create a new key at ${ORCAROUTER_KEYS_URL}. ${error.message}`,
+      )
     }
     fail(error instanceof Error ? error.message : String(error))
   }

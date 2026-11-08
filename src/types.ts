@@ -95,6 +95,35 @@ export interface ReasoningAdapter {
   postReasoning: boolean
 }
 
+/**
+ * One entry of an OpenAI-style `GET /models` catalog as parsed from the
+ * configured inference origin. Fields are `null` when the provider did not
+ * declare them; capability filtering treats missing metadata as incompatible.
+ */
+export interface ModelCatalogEntry {
+  /** Model id exactly as served, namespace included (e.g. `orca/orcacyber-zero-1.5`). */
+  id: string
+  name?: string
+  contextLength: number | null
+  inputModalities: string[] | null
+  outputModalities: string[] | null
+  /** Accepted wire endpoint types (openai / anthropic / gemini / openai-response). */
+  endpointTypes: string[] | null
+}
+
+/**
+ * The model list offered to the user for one inference origin.
+ * `source` is `live` when it came from `GET /models` in this process, and
+ * `seed` when the provider's verified cold-start list is used because live
+ * discovery failed (`fallback: true`, `error` explains why).
+ */
+export interface ModelCatalog {
+  source: 'live' | 'seed'
+  fallback: boolean
+  entries: ModelCatalogEntry[]
+  error?: string
+}
+
 export type SampleCategory = 'valid' | 'invalid' | 'refusal' | 'empty' | 'error'
 
 export interface SampleUsage {

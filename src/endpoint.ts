@@ -2,7 +2,9 @@
  * Endpoint normalization and per-provider reasoning-strategy hints.
  */
 
-import type { Endpoint, ReasoningStrategyId, ResolvedEndpoint } from './types.js'
+import type { Endpoint, ResolvedEndpoint } from './types.js'
+
+export { DEFAULT_ADAPTER_HINT, guessAdapterHint } from './providers/orcarouter.js'
 
 export interface BaseUrlNormalization {
   ok: boolean
@@ -44,28 +46,6 @@ export function normalizeBaseUrl(input: string): BaseUrlNormalization {
   if (path === '' || path === '/') path = '/v1'
 
   return { ok: true, normalized: `${url.protocol}//${url.host}${path}`, warnings }
-}
-
-/** Order in which reasoning-disable strategies are probed for a given host. */
-const HOST_ADAPTER_HINTS: Array<{ hostIncludes: string; hint: ReasoningStrategyId[] }> = [
-  { hostIncludes: 'openrouter.ai', hint: ['openrouter-reasoning', 'openai-effort', 'zhipu-thinking'] },
-  { hostIncludes: 'api.openai.com', hint: ['openai-effort', 'openrouter-reasoning', 'zhipu-thinking'] },
-  { hostIncludes: 'api.deepseek.com', hint: ['openai-effort', 'zhipu-thinking', 'openrouter-reasoning'] },
-  { hostIncludes: 'bigmodel.cn', hint: ['zhipu-thinking', 'openai-effort', 'openrouter-reasoning'] },
-]
-
-export const DEFAULT_ADAPTER_HINT: ReasoningStrategyId[] = [
-  'openrouter-reasoning',
-  'zhipu-thinking',
-  'openai-effort',
-]
-
-export function guessAdapterHint(baseUrl: string): ReasoningStrategyId[] {
-  const lower = baseUrl.toLowerCase()
-  for (const { hostIncludes, hint } of HOST_ADAPTER_HINTS) {
-    if (lower.includes(hostIncludes)) return hint
-  }
-  return DEFAULT_ADAPTER_HINT
 }
 
 /**

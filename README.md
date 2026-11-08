@@ -15,6 +15,7 @@ An independent, open-source TypeScript implementation of:
 This package is **not affiliated with the paper's author** — it is a from-scratch implementation of the published method, engineered as a reusable library + CLI. If you use the method in research, cite the paper.
 
 - **Zero runtime dependencies** — Node ≥ 18 built-in `fetch`, nothing else
+- **Named providers** — e.g. `--provider orcarouter` for OrcaRouter Cyber Inference (see [Named providers](#named-providers))
 - **Library + CLI** — embed it, or run `llm-fingerprint verify` in CI
 - **Reasoning-model aware** — auto-detects how to disable hidden "thinking" (OpenRouter / Zhipu / OpenAI-style), with a graceful fallback
 - **Filter-resistant probes** — every probe is a plain semantic question drawn from a paraphrase pool; there is no magic string a gateway can special-case
@@ -89,6 +90,39 @@ Per-cell JSD (most divergent first):
 Exit codes are CI-friendly: `0` match · `2` mismatch · `3` uncertain · `4` insufficient · `1` error. API keys are only ever read from environment variables (`--api-key-env NAME`, defaulting to `LLM_FINGERPRINT_API_KEY` then `OPENAI_API_KEY`) and are never logged.
 
 More: `llm-fingerprint --help`, [`examples/cli-examples.sh`](examples/cli-examples.sh).
+
+## Named providers
+
+`--provider <id>` skips the manual base-URL / key-variable / model wiring. `llm-fingerprint providers` lists every named provider (also `--json`).
+
+### OrcaRouter Cyber Inference (`--provider orcarouter`)
+
+[OrcaRouter](https://www.orcarouter.ai) is an OpenAI-compatible AI gateway that routes many providers behind one endpoint. The **OrcaRouter Cyber Inference** provider targets security teams doing authorized red/blue-team work — pentests, audits and model-verification pipelines — whose inference requests generic gateways often refuse or silently degrade.
+
+| | |
+|---|---|
+| Provider page | <https://www.orcarouter.ai/cyber> |
+| Cyber-tier model catalog | <https://www.orcarouter.ai/models?tier=cyber> |
+| Base URL | `https://api.orcarouter.ai/v1` |
+| API key | `ORCAROUTER_API_KEY` (an `sk-orca-` key), or `--api-key-env NAME` — create/revoke at <https://www.orcarouter.ai/console/keys> |
+| Default model | `orcarouter/auto` — automatic routing, works with any key |
+| Dedicated cyber models (verified security teams) | `orca/orcacyber-ultra-1.0` (security code scanning, large-codebase multi-step reasoning), `orca/orcacyber-zero-1.5` (OrcaCyber harness; `orca/orcacyber-zero-1.0` also available) |
+| General fallback | `orcarouter/fusion` |
+
+```bash
+export ORCAROUTER_API_KEY=...                   # sk-orca-* key; never logged; read from the environment
+llm-fingerprint providers                       # show the preset and key links
+
+# Model picker bound to the live catalog: GET the provider's /models endpoint
+llm-fingerprint fingerprint --provider orcarouter --model '?' --preset standard \
+  --out orcarouter.reference.json
+
+# Or name a model directly (ids are namespaced inside OrcaRouter):
+llm-fingerprint verify --provider orcarouter --model orca/orcacyber-zero-1.5 \
+  --reference openai/gpt-4o-mini --preset quick
+```
+
+With `--model '?'` the CLI asks `GET /v1/models` on the configured inference origin and lists only models that can answer a text chat completion (an `openai` / `anthropic` / `gemini` / `openai-response` endpoint type or none declared, text output, and the text input modality explicitly declared when the catalog has modality metadata). The provider's default and cyber models are listed first. The request is bounded (10 s timeout, 512 KiB, 500 entries); if discovery fails — bad key, network, timeout, malformed body — the CLI says so and offers only OrcaRouter's four verified seed models, each of which was confirmed against the live catalog. Live success is authoritative: seed entries are never mixed in. A bare model id is qualified into OrcaRouter's namespace (`gpt-4o-mini` → `orca/gpt-4o-mini`, `auto` → `orcarouter/auto`), and fingerprints collected this way record `meta.provider: "orcarouter"`.
 
 ## Quick start — library
 
@@ -228,6 +262,7 @@ No test framework, no bundler — TypeScript and the Node built-in test runner o
 
 Issues and PRs are welcome. Especially valuable:
 
+- **More named providers** in `src/providers/` (mirror the OrcaRouter preset: base URL, key env var, default model, reasoning hint) with tests
 - **More languages** in the probe battery (the paper also used Arabic and Russian) — requires matching normalizer support, see `src/normalizer.ts`
 - **Reference fingerprints** for more models/providers, collected with this tool's protocol (`one-token/v1`) and a documented date/channel
 - **Threshold calibration data**: pairs of same-model / different-model runs to sharpen the match/mismatch cut points

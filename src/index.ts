@@ -60,6 +60,30 @@ export type { ChatCompletionRequest, ChatCompletionResult, ProbeErrorKind } from
 export { normalizeBaseUrl, resolveEndpoint, guessAdapterHint } from './endpoint.js'
 export type { BaseUrlNormalization } from './endpoint.js'
 
+export {
+  ORCAROUTER_API_BASE,
+  ORCAROUTER_KEYS_URL,
+  ORCAROUTER_PROVIDER_ID,
+  ORCAROUTER_PROVIDER_URL,
+  ORCAROUTER_CYBER_CATALOG_URL,
+  ORCAROUTER_PRESET,
+  orcaRouterReasoningBody,
+  PROVIDER_PRESETS,
+  discoverOrcaRouterModels,
+  getProviderPreset,
+  isModelInCatalog,
+  isOrcaRouterBaseUrl,
+  orcaRouterFallbackModels,
+  orcaRouterSeedCatalog,
+  orderCatalogForSelector,
+  qualifyOrcaRouterModel,
+  resolveProviderChoice,
+} from './providers/orcarouter.js'
+export type { ProviderPreset, ResolveProviderOptions, ResolvedProviderChoice } from './providers/orcarouter.js'
+
+export { CATALOG_MAX_BYTES, CATALOG_MAX_MODELS, CATALOG_TIMEOUT_MS, filterChatCatalog, parseModelCatalog } from './catalog.js'
+export type { CatalogFilter } from './catalog.js'
+
 export * from './constants.js'
 
 export type {
@@ -73,6 +97,8 @@ export type {
   Fingerprint,
   FingerprintOptions,
   FingerprintRun,
+  ModelCatalog,
+  ModelCatalogEntry,
   ProbeLang,
   ProbePreset,
   ProbePresetId,
