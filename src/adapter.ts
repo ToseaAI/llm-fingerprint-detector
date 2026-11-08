@@ -22,7 +22,7 @@ import {
   PROBE_MAX_TOKENS,
   PROBE_TEMPERATURE,
 } from './constants.js'
-import { guessAdapterHint } from './endpoint.js'
+import { guessAdapterHint } from './providers/orcarouter.js'
 import { fetchChatCompletion, ProbeRequestError } from './http.js'
 import type {
   CellId,
@@ -57,7 +57,7 @@ export async function detectReasoningAdapter(
   endpoint: ResolvedEndpoint,
   options: AdapterDetectionOptions = {},
 ): Promise<ReasoningAdapter> {
-  const hint = guessAdapterHint(endpoint.baseUrl)
+  const hint: ReasoningStrategyId[] = guessAdapterHint(endpoint.baseUrl)
   const systemPrompt = getSystemPrompt(ADAPTER_PROBE_CELL)
 
   for (const strategy of hint) {
